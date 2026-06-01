@@ -189,5 +189,6 @@ def generar_factura():
     return Response(xml_factura, mimetype="application/xml; charset=utf-8")
 
 if __name__ == "__main__":
-    # Corremos el servicio de facturación en el puerto 5002
-    app.run(host="0.0.0.0", port=5002, debug=True)
+    # Lee el puerto de las variables de entorno (requerido por Render) o usa el 5002 por defecto
+    port = int(os.environ.get("PORT", 5002))
+    app.run(host="0.0.0.0", port=port, debug=True)
