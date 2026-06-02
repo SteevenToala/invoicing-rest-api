@@ -3,9 +3,47 @@ from flask_cors import CORS
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 import os
+from dotenv import load_dotenv
+from twilio.rest import Client
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+from infrastructure.soap_service import procesar_peticion_soap, obtener_wsdl
+
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
+
+@app.route("/soap", methods=["GET", "POST"])
+def soap_endpoint():
+    if request.method == "GET":
+        if "wsdl" in request.args:
+            host_url = request.host_url.rstrip("/") + "/soap"
+            wsdl_content = obtener_wsdl(host_url)
+            return Response(wsdl_content, mimetype="application/xml; charset=utf-8")
+        else:
+            return "Endpoint SOAP activo. Añade ?wsdl a la URL para ver el contrato.", 200
+            
+    elif request.method == "POST":
+        xml_request = request.data.decode('utf-8')
+        if not xml_request:
+            return Response("Petición vacía", status=400)
+            
+        xml_response = procesar_peticion_soap(xml_request)
+        return Response(xml_response, mimetype="application/xml; charset=utf-8")
+
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
+
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+SMTP_USERNAME = os.getenv("SMTP_USERNAME")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL")
 
 IVA_PORCENTAJE = 0.15
 
@@ -75,6 +113,12 @@ def validar_datos(datos):
                 "error": "La dirección es obligatoria."
             })
 
+        if not cliente.get("telefono"):
+            errores.append({
+                "campo": "cliente.telefono",
+                "error": "El teléfono es obligatorio."
+            })
+
     productos = datos.get("productos")
 
     if not isinstance(productos, list) or len(productos) == 0:
@@ -119,6 +163,88 @@ def validar_datos(datos):
                 })
 
     return errores
+
+def enviar_notificacion_twilio(datos):
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        print("Credenciales de Twilio no configuradas.")
+        return
+
+    try:
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        numero_factura = datos.get("numero")
+        nombre_cliente = datos["cliente"]["nombre"]
+        telefono_destino = datos["cliente"]["telefono"]
+        
+        # Twilio requiere el prefijo 'whatsapp:' para mensajes de WhatsApp
+        from_whatsapp = f"whatsapp:{TWILIO_PHONE_NUMBER}"
+        
+        # Asegurar que el teléfono de destino tenga un prefijo '+' si no lo tiene
+        if not telefono_destino.startswith('+'):
+            telefono_destino = f"+{telefono_destino}"
+            
+        to_whatsapp = f"whatsapp:{telefono_destino}"
+        
+        mensaje = f"Hola {nombre_cliente}, tu factura {numero_factura} ha sido generada con éxito en TechStore 360."
+        
+        message = client.messages.create(
+            from_=from_whatsapp,
+            body=mensaje,
+            to=to_whatsapp
+        )
+        print(f"Notificación de Twilio enviada exitosamente. SID: {message.sid}")
+    except Exception as e:
+        print(f"Error al enviar notificación de Twilio: {e}")
+
+def enviar_notificacion_correo(datos, file_path):
+    if not SMTP_USERNAME or not SMTP_PASSWORD:
+        print("Credenciales de SMTP (Brave Email) no configuradas. Omitiendo envío de correo.")
+        return
+
+    try:
+        numero_factura = datos.get("numero")
+        nombre_cliente = datos["cliente"]["nombre"]
+        correo_destino = datos["cliente"]["correo"]
+        
+        # Crear el mensaje multipart
+        mensaje = MIMEMultipart()
+        mensaje["From"] = SMTP_FROM_EMAIL
+        mensaje["To"] = correo_destino
+        mensaje["Subject"] = f"TechStore 360 - Factura Generada: {numero_factura}"
+        
+        cuerpo = f"""
+        Hola {nombre_cliente},
+        
+        Tu factura {numero_factura} ha sido generada exitosamente.
+        Adjunto encontrarás el archivo XML correspondiente a tu compra.
+        
+        Gracias por preferir TechStore 360.
+        """
+        mensaje.attach(MIMEText(cuerpo, "plain"))
+        
+        # Adjuntar archivo XML
+        if file_path and os.path.exists(file_path):
+            with open(file_path, "rb") as adjunto:
+                parte = MIMEBase("application", "octet-stream")
+                parte.set_payload(adjunto.read())
+            
+            encoders.encode_base64(parte)
+            parte.add_header(
+                "Content-Disposition",
+                f"attachment; filename=factura_{numero_factura}.xml",
+            )
+            mensaje.attach(parte)
+        
+        # Conexión al servidor SMTP
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        texto = mensaje.as_string()
+        server.sendmail(SMTP_FROM_EMAIL, correo_destino, texto)
+        server.quit()
+        
+        print(f"Notificación de correo (Brave Email) enviada exitosamente a {correo_destino}.")
+    except Exception as e:
+        print(f"Error al enviar notificación de correo: {e}")
 
 def formatear_xml(elemento):
     xml_sin_formato = ET.tostring(elemento, encoding="utf-8")
@@ -183,6 +309,13 @@ def generar_factura():
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(xml_factura)
         print(f"Factura guardada físicamente en: {file_path}")
+        
+        # Enviar notificación por Twilio (WhatsApp)
+        enviar_notificacion_twilio(datos)
+        
+        # Enviar notificación por Brave Email (SMTP)
+        enviar_notificacion_correo(datos, file_path)
+        
     except Exception as e:
         print(f"Error al guardar el archivo de factura: {e}")
         
@@ -191,4 +324,8 @@ def generar_factura():
 if __name__ == "__main__":
     # Lee el puerto de las variables de entorno (requerido por Render) o usa el 5002 por defecto
     port = int(os.environ.get("PORT", 5002))
+    print(f"Iniciando servidor en el puerto {port}")
+    print(f"Ruta REST API: http://localhost:{port}/api/factura")
+    print(f"Ruta SOAP WSDL: http://localhost:{port}/soap?wsdl")
     app.run(host="0.0.0.0", port=port, debug=True)
+
