@@ -66,16 +66,11 @@ SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL")
 
 IVA_PORCENTAJE = 0.15
 
-# Asegurar que exista la carpeta para guardar las facturas generadas
-FACTURAS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "facturas")
-os.makedirs(FACTURAS_DIR, exist_ok=True)
-
 @app.route("/")
 def inicio():
     return jsonify({
         "success": True,
-        "message": "Servicio de Facturación REST de TechStore 360 listo y funcionando",
-        "facturas_guardadas_dir": FACTURAS_DIR
+        "message": "Servicio de Facturación REST de TechStore 360 listo y funcionando"
     }), 200
 
 def validar_datos(datos):
@@ -214,7 +209,7 @@ def enviar_notificacion_twilio(datos):
     except Exception as e:
         print(f"Error al enviar notificación de Twilio: {e}")
 
-def enviar_notificacion_correo(datos, file_path):
+def enviar_notificacion_correo(datos, xml_content):
     if not SMTP_USERNAME or not SMTP_PASSWORD:
         print("Credenciales de SMTP (Brave Email) no configuradas. Omitiendo envío de correo.")
         return
@@ -240,11 +235,11 @@ def enviar_notificacion_correo(datos, file_path):
         """
         mensaje.attach(MIMEText(cuerpo, "plain"))
         
-        # Adjuntar archivo XML
-        if file_path and os.path.exists(file_path):
-            with open(file_path, "rb") as adjunto:
-                parte = MIMEBase("application", "octet-stream")
-                parte.set_payload(adjunto.read())
+        # Adjuntar archivo XML (generado en memoria)
+        if xml_content:
+            parte = MIMEBase("application", "octet-stream")
+            payload = xml_content.encode("utf-8") if isinstance(xml_content, str) else xml_content
+            parte.set_payload(payload)
             
             encoders.encode_base64(parte)
             parte.add_header(
@@ -320,23 +315,15 @@ def generar_factura():
         
     xml_factura = crear_factura_xml(datos)
     
-    # Escribir el archivo XML físicamente en la carpeta 'facturas/'
-    numero_factura = datos.get("numero", "F000-000000").replace("/", "-").replace("\\", "-")
-    file_path = os.path.join(FACTURAS_DIR, f"factura_{numero_factura}.xml")
-    
     try:
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(xml_factura)
-        print(f"Factura guardada físicamente en: {file_path}")
-        
         # Enviar notificación por Twilio (WhatsApp)
         enviar_notificacion_twilio(datos)
         
-        # Enviar notificación por Brave Email (SMTP)
-        enviar_notificacion_correo(datos, file_path)
+        # Enviar notificación por Brave Email (SMTP) en memoria
+        enviar_notificacion_correo(datos, xml_factura)
         
     except Exception as e:
-        print(f"Error al guardar el archivo de factura: {e}")
+        app.logger.error(f"Error al procesar las notificaciones de la factura: {e}", exc_info=True)
         
     return Response(xml_factura, mimetype="application/xml; charset=utf-8")
 
