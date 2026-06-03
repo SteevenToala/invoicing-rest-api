@@ -248,8 +248,8 @@ def enviar_notificacion_correo(datos, xml_content):
             )
             mensaje.attach(parte)
         
-        # Conexión al servidor SMTP
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        # Conexión al servidor SMTP con timeout para evitar colgar el worker de Gunicorn
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=5)
         server.starttls()
         server.login(SMTP_USERNAME, SMTP_PASSWORD)
         texto = mensaje.as_string()
