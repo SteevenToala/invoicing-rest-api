@@ -3,6 +3,13 @@ from flask_cors import CORS
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 import os
+import io
+import base64
+import requests
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import cm
+from reportlab.graphics.barcode import code128
 from dotenv import load_dotenv
 from twilio.rest import Client
 import smtplib
@@ -63,6 +70,8 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 SMTP_USERNAME = os.getenv("SMTP_USERNAME")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 SMTP_FROM_EMAIL = os.getenv("SMTP_FROM_EMAIL")
+
+BREVO_API_KEY = os.getenv("BREVO_API_KEY")
 
 IVA_PORCENTAJE = 0.15
 
@@ -209,9 +218,133 @@ def enviar_notificacion_twilio(datos):
     except Exception as e:
         print(f"Error al enviar notificación de Twilio: {e}")
 
+def crear_factura_pdf(datos):
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+    
+    margin_x = 1.5 * cm
+    
+    # ------------------ SECCION SUPERIOR ------------------
+    # Caja RUC (Derecha)
+    c.rect(width/2 + 0.5*cm, height - 8.5*cm, width/2 - 2*cm, 7*cm)
+    
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(width/2 + 1*cm, height - 2*cm, "RUC:        0000000000001")
+    c.drawString(width/2 + 1*cm, height - 2.5*cm, "Tipo:       FACTURA")
+    c.drawString(width/2 + 1*cm, height - 3*cm, f"Número:  {datos.get('numero', '001-001-000000001')}")
+    
+    c.setFont("Helvetica", 9)
+    c.drawString(width/2 + 1*cm, height - 4*cm, "Ambiente:   PRODUCCION")
+    c.drawString(width/2 + 1*cm, height - 4.4*cm, "Emisión:    NORMAL")
+    c.drawString(width/2 + 1*cm, height - 4.8*cm, f"Fecha y Hora: {datos.get('fecha')} 12:00")
+    
+    c.drawString(width/2 + 1*cm, height - 5.5*cm, "Número Autorización / Clave de Acceso:")
+    clave_acceso = "1208202001179247719000120011000000000080000000111"
+    c.drawString(width/2 + 1*cm, height - 5.9*cm, clave_acceso)
+    
+    # Barcode
+    barcode = code128.Code128(clave_acceso, barHeight=1.2*cm, barWidth=0.8)
+    barcode.drawOn(c, width/2 + 1*cm, height - 7.5*cm)
+    
+    # Caja Empresa (Izquierda)
+    c.rect(margin_x, height - 8.5*cm, width/2 - 1.5*cm, 7*cm)
+    # Mock logo
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(margin_x + 0.5*cm, height - 2.5*cm, "TECHSTORE 360")
+    
+    c.setFont("Helvetica-Bold", 8)
+    c.drawString(margin_x + 0.5*cm, height - 4.5*cm, "RAZON SOCIAL: TechStore 360 S.A.")
+    c.drawString(margin_x + 0.5*cm, height - 5.5*cm, "DIRECCIÓN: Av. Principal y Secundaria")
+    c.drawString(margin_x + 0.5*cm, height - 6.5*cm, "OBLIGADO A LLEVAR CONTABILIDAD: SI")
+    
+    # ------------------ INFO CLIENTE ------------------
+    y_cliente = height - 10.5*cm
+    c.rect(margin_x, y_cliente, width - 3*cm, 1.8*cm)
+    c.setFont("Helvetica", 9)
+    cliente = datos.get('cliente', {})
+    c.drawString(margin_x + 0.2*cm, y_cliente + 1.2*cm, f"RAZÓN SOCIAL/NOMBRES: {cliente.get('nombre')}")
+    c.drawString(margin_x + 0.2*cm, y_cliente + 0.7*cm, f"IDENTIFICACIÓN: {cliente.get('cedula_ruc')}")
+    c.drawString(margin_x + 0.2*cm, y_cliente + 0.2*cm, f"DIRECCIÓN: {cliente.get('direccion')}")
+    c.drawString(width - 7*cm, y_cliente + 1.2*cm, f"FECHA EMISIÓN: {datos.get('fecha')}")
+    
+    # ------------------ DETALLE PRODUCTOS ------------------
+    y_table = y_cliente - 1*cm
+    c.rect(margin_x, y_table - 6*cm, width - 3*cm, 6*cm) # Box for table
+    
+    # Headers
+    c.setFont("Helvetica-Bold", 8)
+    c.drawString(margin_x + 0.2*cm, y_table - 0.4*cm, "CÓDIGO")
+    c.drawString(margin_x + 2*cm, y_table - 0.4*cm, "CANT")
+    c.drawString(margin_x + 3.5*cm, y_table - 0.4*cm, "DESCRIPCIÓN")
+    c.drawString(width - 5.5*cm, y_table - 0.4*cm, "PVP")
+    c.drawString(width - 4*cm, y_table - 0.4*cm, "DESC")
+    c.drawString(width - 2.5*cm, y_table - 0.4*cm, "TOTAL")
+    
+    c.line(margin_x, y_table - 0.6*cm, width - 1.5*cm, y_table - 0.6*cm)
+    
+    y = y_table - 1.2*cm
+    c.setFont("Helvetica", 8)
+    subtotal_general = 0
+    for i, item in enumerate(datos.get("productos", [])):
+        cantidad = float(item.get("cantidad", 0))
+        precio_unitario = float(item.get("precio_unitario", 0))
+        subtotal = cantidad * precio_unitario
+        subtotal_general += subtotal
+        
+        c.drawString(margin_x + 0.2*cm, y, f"PROD-{i+1}")
+        c.drawString(margin_x + 2*cm, y, f"{cantidad:.2f}")
+        c.drawString(margin_x + 3.5*cm, y, str(item.get("nombre"))[:45])
+        c.drawString(width - 5.5*cm, y, f"{precio_unitario:.2f}")
+        c.drawString(width - 4*cm, y, "0.00")
+        c.drawString(width - 2.5*cm, y, f"{subtotal:.2f}")
+        y -= 0.6*cm
+        
+    # ------------------ TOTALES ------------------
+    y_totals = y_table - 6.5*cm
+    
+    # Info Adicional Izquierda
+    c.rect(margin_x, y_totals - 3*cm, width/2, 2.5*cm)
+    c.setFont("Helvetica-Bold", 8)
+    c.drawString(margin_x + 0.2*cm, y_totals - 0.8*cm, "Información Adicional")
+    c.setFont("Helvetica", 8)
+    c.drawString(margin_x + 0.2*cm, y_totals - 1.3*cm, f"Email: {cliente.get('correo')}")
+    c.drawString(margin_x + 0.2*cm, y_totals - 1.8*cm, f"Teléfono: {cliente.get('telefono')}")
+    
+    # Totales Derecha
+    x_totales = width - 7*cm
+    w_totales = 5.5*cm
+    c.rect(x_totales, y_totals - 3*cm, w_totales, 2.5*cm)
+    
+    iva = subtotal_general * IVA_PORCENTAJE
+    total = subtotal_general + iva
+    
+    c.drawString(x_totales + 0.2*cm, y_totals - 0.8*cm, f"SUBTOTAL {int(IVA_PORCENTAJE*100)}%")
+    c.drawString(x_totales + 3.5*cm, y_totals - 0.8*cm, f"{subtotal_general:.2f}")
+    
+    c.drawString(x_totales + 0.2*cm, y_totals - 1.3*cm, "SUBTOTAL 0%")
+    c.drawString(x_totales + 3.5*cm, y_totals - 1.3*cm, "0.00")
+    
+    c.drawString(x_totales + 0.2*cm, y_totals - 1.8*cm, f"IVA {int(IVA_PORCENTAJE*100)}%")
+    c.drawString(x_totales + 3.5*cm, y_totals - 1.8*cm, f"{iva:.2f}")
+    
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(x_totales + 0.2*cm, y_totals - 2.8*cm, "VALOR TOTAL")
+    c.drawString(x_totales + 3.5*cm, y_totals - 2.8*cm, f"{total:.2f}")
+    
+    # Forma de pago
+    c.rect(margin_x, y_totals - 4.5*cm, width - 3*cm, 1*cm)
+    c.setFont("Helvetica", 8)
+    c.drawString(margin_x + 0.2*cm, y_totals - 4*cm, "FORMA DE PAGO: Otros con Utilización del Sistema Financiero")
+    c.drawString(width - 5.5*cm, y_totals - 4*cm, f"TOTAL: {total:.2f}")
+    
+    c.save()
+    buffer.seek(0)
+    return buffer.read()
+
 def enviar_notificacion_correo(datos, xml_content):
-    if not SMTP_USERNAME or not SMTP_PASSWORD:
-        print("Credenciales de SMTP (Brave Email) no configuradas. Omitiendo envío de correo.")
+    if not BREVO_API_KEY:
+        print("API Key de Brevo no configurada. Omitiendo envío de correo.")
         return
 
     try:
@@ -219,44 +352,60 @@ def enviar_notificacion_correo(datos, xml_content):
         nombre_cliente = datos["cliente"]["nombre"]
         correo_destino = datos["cliente"]["correo"]
         
-        # Crear el mensaje multipart
-        mensaje = MIMEMultipart()
-        mensaje["From"] = SMTP_FROM_EMAIL
-        mensaje["To"] = correo_destino
-        mensaje["Subject"] = f"TechStore 360 - Factura Generada: {numero_factura}"
+        # Generar el PDF en memoria
+        pdf_content = crear_factura_pdf(datos)
         
-        cuerpo = f"""
-        Hola {nombre_cliente},
+        # Codificar en base64 para Brevo
+        pdf_b64 = base64.b64encode(pdf_content).decode("utf-8")
         
-        Tu factura {numero_factura} ha sido generada exitosamente.
-        Adjunto encontrarás el archivo XML correspondiente a tu compra.
-        
-        Gracias por preferir TechStore 360.
-        """
-        mensaje.attach(MIMEText(cuerpo, "plain"))
-        
-        # Adjuntar archivo XML (generado en memoria)
+        xml_b64 = ""
         if xml_content:
-            parte = MIMEBase("application", "octet-stream")
             payload = xml_content.encode("utf-8") if isinstance(xml_content, str) else xml_content
-            parte.set_payload(payload)
+            xml_b64 = base64.b64encode(payload).decode("utf-8")
+        
+        url = "https://api.brevo.com/v3/smtp/email"
+        
+        headers = {
+            "accept": "application/json",
+            "api-key": BREVO_API_KEY,
+            "content-type": "application/json"
+        }
+        
+        payload_data = {
+            "sender": {
+                "name": "TechStore 360",
+                "email": SMTP_FROM_EMAIL or "noreply@techstore360.com"
+            },
+            "to": [
+                {
+                    "email": correo_destino,
+                    "name": nombre_cliente
+                }
+            ],
+            "subject": f"TechStore 360 - Factura Generada: {numero_factura}",
+            "htmlContent": f"<html><body><p>Hola {nombre_cliente},</p><p>Tu factura {numero_factura} ha sido generada exitosamente.</p><p>Adjunto encontrarás tu factura en formato PDF y XML correspondiente a tu compra.</p><p>Gracias por preferir TechStore 360.</p></body></html>",
+            "attachment": []
+        }
+        
+        if xml_b64:
+            payload_data["attachment"].append({
+                "content": xml_b64,
+                "name": f"factura_{numero_factura}.xml"
+            })
             
-            encoders.encode_base64(parte)
-            parte.add_header(
-                "Content-Disposition",
-                f"attachment; filename=factura_{numero_factura}.xml",
-            )
-            mensaje.attach(parte)
+        if pdf_b64:
+            payload_data["attachment"].append({
+                "content": pdf_b64,
+                "name": f"factura_{numero_factura}.pdf"
+            })
+            
+        response = requests.post(url, headers=headers, json=payload_data, timeout=10)
         
-        # Conexión al servidor SMTP con timeout para evitar colgar el worker de Gunicorn
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=5)
-        server.starttls()
-        server.login(SMTP_USERNAME, SMTP_PASSWORD)
-        texto = mensaje.as_string()
-        server.sendmail(SMTP_FROM_EMAIL, correo_destino, texto)
-        server.quit()
-        
-        print(f"Notificación de correo (Brave Email) enviada exitosamente a {correo_destino}.")
+        if response.status_code in (200, 201, 202):
+            print(f"Notificación de correo (Brevo) enviada exitosamente a {correo_destino}.")
+        else:
+            print(f"Error al enviar notificación de correo por Brevo: {response.text}")
+            
     except Exception as e:
         print(f"Error al enviar notificación de correo: {e}")
 
