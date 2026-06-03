@@ -11,11 +11,30 @@ from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
 from infrastructure.soap_service import procesar_peticion_soap, obtener_wsdl
+from werkzeug.exceptions import HTTPException
 
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    # Registrar el error completo en la consola del servidor (útil para Render/Gunicorn logs)
+    app.logger.error(f"Error detectado: {e}", exc_info=True)
+    
+    # Si es una excepción HTTP estándar (como 404, 405), devolver su código y descripción en JSON
+    if isinstance(e, HTTPException):
+        return jsonify({
+            "error": e.description,
+            "code": e.code
+        }), e.code
+        
+    # Para cualquier otro error interno del servidor, devolver 500 con el mensaje de la excepción en JSON
+    return jsonify({
+        "error": str(e),
+        "code": 500
+    }), 500
 
 @app.route("/soap", methods=["GET", "POST"])
 def soap_endpoint():
