@@ -343,10 +343,6 @@ def crear_factura_pdf(datos):
     return buffer.read()
 
 def enviar_notificacion_correo(datos, xml_content):
-    if not BREVO_API_KEY:
-        print("API Key de Brevo no configurada. Omitiendo envío de correo.")
-        return
-
     try:
         numero_factura = datos.get("numero")
         nombre_cliente = datos["cliente"]["nombre"]
@@ -355,56 +351,31 @@ def enviar_notificacion_correo(datos, xml_content):
         # Generar el PDF en memoria
         pdf_content = crear_factura_pdf(datos)
         
-        # Codificar en base64 para Brevo
-        pdf_b64 = base64.b64encode(pdf_content).decode("utf-8")
+        # Preparar el contenido XML en bytes
+        xml_bytes = xml_content.encode("utf-8") if isinstance(xml_content, str) else xml_content
         
-        xml_b64 = ""
-        if xml_content:
-            payload = xml_content.encode("utf-8") if isinstance(xml_content, str) else xml_content
-            xml_b64 = base64.b64encode(payload).decode("utf-8")
-        
-        url = "https://api.brevo.com/v3/smtp/email"
+        url = "https://n8n.gestionplus.online/correo/send-facturas"
         
         headers = {
-            "accept": "application/json",
-            "api-key": BREVO_API_KEY,
-            "content-type": "application/json"
+            "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJub21icmVTaXN0ZW1hIjoiR2VzdGlvblBsdXMgRGV2SHViIiwidXJsIjoiaHR0cHM6Ly9nZXN0aW9ucGx1cy5vbmxpbmUifQ.T9fbJfJggXMSA4YOw-X71-vS2H6jubA7CkjswHnis4Q"
         }
         
-        payload_data = {
-            "sender": {
-                "name": "TechStore 360",
-                "email": SMTP_FROM_EMAIL or "noreply@techstore360.com"
-            },
-            "to": [
-                {
-                    "email": correo_destino,
-                    "name": nombre_cliente
-                }
-            ],
-            "subject": f"TechStore 360 - Factura Generada: {numero_factura}",
-            "htmlContent": f"<html><body><p>Hola {nombre_cliente},</p><p>Tu factura {numero_factura} ha sido generada exitosamente.</p><p>Adjunto encontrarás tu factura en formato PDF y XML correspondiente a tu compra.</p><p>Gracias por preferir TechStore 360.</p></body></html>",
-            "attachment": []
+        data = {
+            "email": correo_destino,
+            "mensaje": f"Hola {nombre_cliente},\n\nAdjuntamos su factura electrónica {numero_factura} generada exitosamente."
         }
         
-        if xml_b64:
-            payload_data["attachment"].append({
-                "content": xml_b64,
-                "name": f"factura_{numero_factura}.xml"
-            })
-            
-        if pdf_b64:
-            payload_data["attachment"].append({
-                "content": pdf_b64,
-                "name": f"factura_{numero_factura}.pdf"
-            })
-            
-        response = requests.post(url, headers=headers, json=payload_data, timeout=10)
+        files = [
+            ("archivos", (f"factura_{numero_factura}.xml", xml_bytes, "application/xml")),
+            ("archivos", (f"factura_{numero_factura}.pdf", pdf_content, "application/pdf"))
+        ]
+        
+        response = requests.post(url, headers=headers, data=data, files=files, timeout=15)
         
         if response.status_code in (200, 201, 202):
-            print(f"Notificación de correo (Brevo) enviada exitosamente a {correo_destino}.")
+            print(f"Notificación de correo enviada exitosamente a {correo_destino}.")
         else:
-            print(f"Error al enviar notificación de correo por Brevo: {response.text}")
+            print(f"Error al enviar notificación de correo: {response.status_code} - {response.text}")
             
     except Exception as e:
         print(f"Error al enviar notificación de correo: {e}")
