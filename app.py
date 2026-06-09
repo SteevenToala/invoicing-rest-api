@@ -201,9 +201,13 @@ def enviar_notificacion_twilio(datos):
         # Twilio requiere el prefijo 'whatsapp:' para mensajes de WhatsApp
         from_whatsapp = f"whatsapp:{TWILIO_PHONE_NUMBER}"
         
-        # Asegurar que el teléfono de destino tenga un prefijo '+' si no lo tiene
+        # Asegurar que el teléfono de destino tenga el formato internacional
         if not telefono_destino.startswith('+'):
-            telefono_destino = f"+{telefono_destino}"
+            if telefono_destino.startswith('0'):
+                # Si empieza con 0 (ej. 099...), se asume número local de Ecuador
+                telefono_destino = f"+593{telefono_destino[1:]}"
+            else:
+                telefono_destino = f"+593{telefono_destino}"
             
         to_whatsapp = f"whatsapp:{telefono_destino}"
         
