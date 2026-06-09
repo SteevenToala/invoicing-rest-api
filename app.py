@@ -188,18 +188,23 @@ def validar_datos(datos):
     return errores
 
 def enviar_notificacion_twilio(datos):
-    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+    twilio_config = datos.get("twilio", {})
+    account_sid = twilio_config.get("account_sid", TWILIO_ACCOUNT_SID)
+    auth_token = twilio_config.get("auth_token", TWILIO_AUTH_TOKEN)
+    phone_number = twilio_config.get("phone_number", TWILIO_PHONE_NUMBER)
+
+    if not account_sid or not auth_token or not phone_number:
         print("Credenciales de Twilio no configuradas.")
         return
 
     try:
-        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        client = Client(account_sid, auth_token)
         numero_factura = datos.get("numero")
         nombre_cliente = datos["cliente"]["nombre"]
         telefono_destino = datos["cliente"]["telefono"]
         
         # Twilio requiere el prefijo 'whatsapp:' para mensajes de WhatsApp
-        from_whatsapp = f"whatsapp:{TWILIO_PHONE_NUMBER}"
+        from_whatsapp = f"whatsapp:{phone_number}"
         
         # Asegurar que el teléfono de destino tenga el formato internacional
         if not telefono_destino.startswith('+'):
